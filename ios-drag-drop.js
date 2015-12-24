@@ -1,78 +1,113 @@
-(function(doc) {
+(function (doc) {
+  'use strict';
 
-  log = noop; // noOp, remove this line to enable debugging
+  // log = noop; // noOp, remove this line to enable debugging
 
   var coordinateSystemForElementFromPoint;
+  var lastTouchStart = getTimeStamp();
+  var DELAY = 300;
+  var MOVE_DELAY = 100;
+  var throttledTouchStart = _.throttle(touchstart, DELAY);
+  var throttledClickStart = _.throttle(touchClick, DELAY);
 
   function main(config) {
     config = config || {};
 
-    coordinateSystemForElementFromPoint = navigator.userAgent.match(/OS [1-4](?:_\d+)+ like Mac/) ? "page" : "client";
+    coordinateSystemForElementFromPoint = navigator.userAgent.match(/OS [1-4](?:_\d+)+ like Mac/) ? 'page' : 'client';
 
     var div = doc.createElement('div');
     var dragDiv = 'draggable' in div;
     var evts = 'ondragstart' in div && 'ondrop' in div;
 
     var needsPatch = !(dragDiv || evts) || /iPad|iPhone|iPod|Android/.test(navigator.userAgent);
-    log((needsPatch ? "" : "not ") + "patching html5 drag drop");
+    log((needsPatch ? '' : 'not ') + 'patching html5 drag drop');
 
-    if(!needsPatch) {
-        return;
+    if (!needsPatch) {
+      return;
     }
 
-    if(!config.enableEnterLeave) {
+    if (!config.enableEnterLeave) {
       DragDrop.prototype.synthesizeEnterLeave = noop;
     }
 
-    doc.addEventListener("touchstart", touchstart);
+    doc.addEventListener('touchstart', throttledTouchStart);
+    doc.addEventListener('click', onClickDoc);
+    doc.addEventListener('mousedown', onMousedownDoc);
   }
 
   function DragDrop(event, el) {
 
-    this.dragData = {};
-    this.dragDataTypes = [];
-    this.dragImage = null;
-    this.dragImageTransform = null;
-    this.dragImageWebKitTransform = null;
-    this.el = el || event.target;
-
-    log("dragstart");
-
-    this.dispatchDragStart();
-    this.createDragImage();
-
-    this.listen();
-
+    this.startTimestamp = getTimeStamp();
+    this.el = el;
+    this.originalEvent = event;
+    log('dragstart');
+    this.init(this.el);
   }
 
   DragDrop.prototype = {
-    listen: function() {
-      var move = onEvt(doc, "touchmove", this.move, this);
-      var end = onEvt(doc, "touchend", ontouchend, this);
-      var cancel = onEvt(doc, "touchcancel", cleanup, this);
+    init: function (el) {
+      this.dragData = {};
+      this.dragDataTypes = [];
+      this.dragImage = null;
+      this.dragImageTransform = null;
+      this.dragImageWebKitTransform = null;
+      this.isGenericDragImage = true;
+      this.el = el || event.target;
+
+      log('dragstart+touchmove');
+
+      this.dispatchDragStart();
+      this.createDragImage();
+      this.listen();
+    },
+    listen: function () {
+      var move,
+          end,
+          cancel,
+          click;
+      init.apply(this);
+
+      function init() {
+        move = onEvt(doc, 'touchmove', _.throttle(this.move, MOVE_DELAY), this);
+        end = onEvt(doc, 'touchend', ontouchend, this);
+        cancel = onEvt(doc, 'touchcancel', cleanup, this);
+        /*        click = onEvt(doc, 'click', onClick, this);*/
+      }
 
       function ontouchend(event) {
         this.dragend(event, event.target);
         cleanup.call(this);
       }
+
+      function onClick(event) {
+        log('click');
+        //     emitEvent('click', this.el, this.originalEvent);
+        cleanup();
+      }
+
       function cleanup() {
-        log("cleanup");
+        log('cleanup');
         this.dragDataTypes = [];
-        if (this.dragImage !== null) {
-          this.dragImage.parentNode.removeChild(this.dragImage);
+        if (this.dragImage) {
+          if (this.dragImage.parentNode) {
+            this.dragImage.parentNode.removeChild(this.dragImage);
+          }
           this.dragImage = null;
           this.dragImageTransform = null;
           this.dragImageWebKitTransform = null;
         }
         this.el = this.dragData = null;
-        return [move, end, cancel].forEach(function(handler) {
+        return [move, end, cancel].forEach(function (handler) {
           return handler.off();
         });
       }
     },
-    move: function(event) {
+    move: function (event) {
+      if (this.el === null) {
+        return;
+      }
       var pageXs = [], pageYs = [];
-      [].forEach.call(event.changedTouches, function(touch) {
+      [].forEach.call(event.changedTouches, function (touch) {
         pageXs.push(touch.pageX);
         pageYs.push(touch.pageY);
       });
@@ -85,18 +120,18 @@
     },
     // We use translate instead of top/left because of sub-pixel rendering and for the hope of better performance
     // http://www.paulirish.com/2012/why-moving-elements-with-translate-is-better-than-posabs-topleft/
-    translateDragImage: function(x, y) {
-      var translate = " translate(" + x + "px," + y + "px)";
+    translateDragImage: function (x, y) {
+      var translate = ' translate(' + x + 'px,' + y + 'px)';
 
       if (this.dragImageWebKitTransform !== null) {
-        this.dragImage.style["-webkit-transform"] = this.dragImageWebKitTransform + translate;
+        this.dragImage.style['-webkit-transform'] = this.dragImageWebKitTransform + translate;
       }
       if (this.dragImageTransform !== null) {
         this.dragImage.style.transform = this.dragImageTransform + translate;
       }
     },
-    synthesizeEnterLeave: function(event) {
-      var target = elementFromTouchEvent(this.el,event)
+    synthesizeEnterLeave: function (event) {
+      var target = this.elementFromTouchEvent(this.el, event);
       if (target != this.lastEnter) {
         if (this.lastEnter) {
           this.dispatchLeave(event);
@@ -110,31 +145,37 @@
         this.dispatchOver(event);
       }
     },
-    dragend: function(event) {
+    dragend: function (event) {
+      // Check if it's really a click
+      var last = new Date().getTime() - this.startTimestamp;
+      if (last < DELAY) {
+        emitEvent('click', event.target, event);
+        return;
+      }
 
       // we'll dispatch drop if there's a target, then dragEnd.
       // drop comes first http://www.whatwg.org/specs/web-apps/current-work/multipage/dnd.html#drag-and-drop-processing-model
-      log("dragend");
+      log('dragend');
 
       if (this.lastEnter) {
         this.dispatchLeave(event);
       }
 
-      var target = elementFromTouchEvent(this.el,event)
+      var target = this.elementFromTouchEvent(this.el, event);
       if (target) {
-        log("found drop target " + target.tagName);
+        log('found drop target ' + target.tagName);
         this.dispatchDrop(target, event);
       } else {
-        log("no drop target");
+        log('no drop target');
       }
 
-      var dragendEvt = doc.createEvent("Event");
-      dragendEvt.initEvent("dragend", true, true);
+      var dragendEvt = doc.createEvent('Event');
+      dragendEvt.initEvent('dragend', true, true);
       this.el.dispatchEvent(dragendEvt);
     },
-    dispatchDrop: function(target, event) {
-      var dropEvt = doc.createEvent("Event");
-      dropEvt.initEvent("drop", true, true);
+    dispatchDrop: function (target, event) {
+      var dropEvt = doc.createEvent('Event');
+      dropEvt.initEvent('drop', true, true);
 
       var touch = event.changedTouches[0];
       var x = touch[coordinateSystemForElementFromPoint + 'X'];
@@ -144,27 +185,27 @@
 
       dropEvt.dataTransfer = {
         types: this.dragDataTypes,
-        getData: function(type) {
+        getData: function (type) {
           return this.dragData[type];
         }.bind(this)
       };
-      dropEvt.preventDefault = function() {
-         // https://www.w3.org/Bugs/Public/show_bug.cgi?id=14638 - if we don't cancel it, we'll snap back
+      dropEvt.preventDefault = function () {
+        // https://www.w3.org/Bugs/Public/show_bug.cgi?id=14638 - if we don't cancel it, we'll snap back
       }.bind(this);
 
-      once(doc, "drop", function() {
-        log("drop event not canceled");
-      },this);
+      /*      once(doc, 'drop', function () {
+       log('drop event not canceled');
+       }, this);*/
 
       target.dispatchEvent(dropEvt);
     },
-    dispatchEnter: function(event) {
+    dispatchEnter: function (event) {
 
-      var enterEvt = doc.createEvent("Event");
-      enterEvt.initEvent("dragenter", true, true);
+      var enterEvt = doc.createEvent('Event');
+      enterEvt.initEvent('dragenter', true, true);
       enterEvt.dataTransfer = {
         types: this.dragDataTypes,
-        getData: function(type) {
+        getData: function (type) {
           return this.dragData[type];
         }.bind(this)
       };
@@ -175,13 +216,13 @@
 
       this.lastEnter.dispatchEvent(enterEvt);
     },
-    dispatchOver: function(event) {
+    dispatchOver: function (event) {
 
-      var overEvt = doc.createEvent("Event");
-      overEvt.initEvent("dragover", true, true);
+      var overEvt = doc.createEvent('Event');
+      overEvt.initEvent('dragover', true, true);
       overEvt.dataTransfer = {
         types: this.dragDataTypes,
-        getData: function(type) {
+        getData: function (type) {
           return this.dragData[type];
         }.bind(this)
       };
@@ -192,13 +233,13 @@
 
       this.lastEnter.dispatchEvent(overEvt);
     },
-    dispatchLeave: function(event) {
+    dispatchLeave: function (event) {
 
-      var leaveEvt = doc.createEvent("Event");
-      leaveEvt.initEvent("dragleave", true, true);
+      var leaveEvt = doc.createEvent('Event');
+      leaveEvt.initEvent('dragleave', true, true);
       leaveEvt.dataTransfer = {
         types: this.dragDataTypes,
-        getData: function(type) {
+        getData: function (type) {
           return this.dragData[type];
         }.bind(this)
       };
@@ -210,45 +251,53 @@
       this.lastEnter.dispatchEvent(leaveEvt);
       this.lastEnter = null;
     },
-    dispatchDragStart: function() {
-      var evt = doc.createEvent("Event");
-      evt.initEvent("dragstart", true, true);
+    dispatchDragStart: function () {
+      var evt = doc.createEvent('Event');
+      evt.initEvent('dragstart', true, true);
       evt.dataTransfer = {
-        setData: function(type, val) {
+        setDragImage: function (dragImage) {
+          this.dragImage = dragImage;
+          this.isGenericDragImage = false;
+        }.bind(this),
+        getData: function (type) {
+          return this.dragData[type];
+        }.bind(this),
+        setData: function (type, val) {
           this.dragData[type] = val;
-          if (this.dragDataTypes.indexOf(type) == -1) {
+          if (this.dragDataTypes.indexOf(type) === -1) {
             this.dragDataTypes[this.dragDataTypes.length] = type;
           }
           return val;
         }.bind(this),
-        dropEffect: "move"
+        dropEffect: 'move'
       };
       this.el.dispatchEvent(evt);
     },
-    createDragImage: function() {
-      this.dragImage = this.el.cloneNode(true);
-      
-      duplicateStyle(this.el, this.dragImage);
-      
-      this.dragImage.style.opacity = "0.5";
-      this.dragImage.style.position = "absolute";
-      this.dragImage.style.left = "0px";
-      this.dragImage.style.top = "0px";
-      this.dragImage.style.zIndex = "999999";
+    createDragImage: function () {
+      this.dragImage = this.dragImage || this.el.cloneNode(true);
 
+      if (this.isGenericDragImage) {
+        duplicateStyle(this.el, this.dragImage);
+      }
+
+      this.dragImage.style.opacity = '0.5';
+      this.dragImage.style.position = 'absolute';
+      this.dragImage.style.left = '0px';
+      this.dragImage.style.top = '0px';
+      this.dragImage.style.zIndex = '999999';
 
       var transform = this.dragImage.style.transform;
-      if (typeof transform !== "undefined") {
-        this.dragImageTransform = "";
-        if (transform != "none") {
+      if (typeof transform !== 'undefined') {
+        this.dragImageTransform = '';
+        if (transform !== 'none') {
           this.dragImageTransform = transform.replace(/translate\(\D*\d+[^,]*,\D*\d+[^,]*\)\s*/g, '');
         }
       }
 
-      var webkitTransform = this.dragImage.style["-webkit-transform"];
-      if (typeof webkitTransform !== "undefined") {
-        this.dragImageWebKitTransform = "";
-        if (webkitTransform != "none") {
+      var webkitTransform = this.dragImage.style['-webkit-transform'];
+      if (typeof webkitTransform !== 'undefined') {
+        this.dragImageWebKitTransform = '';
+        if (webkitTransform !== 'none') {
           this.dragImageWebKitTransform = webkitTransform.replace(/translate\(\D*\d+[^,]*,\D*\d+[^,]*\)\s*/g, '');
         }
       }
@@ -256,73 +305,135 @@
       this.translateDragImage(-9999, -9999);
 
       doc.body.appendChild(this.dragImage);
+    },
+
+    elementFromTouchEvent: function (el, event) {
+      var touch = event.changedTouches[0];
+      var targets = deepElementsFromPoint(
+          touch[coordinateSystemForElementFromPoint + 'X'],
+          touch[coordinateSystemForElementFromPoint + 'Y'],
+          2
+      );
+      return this.isGenericDragImage ? targets[0] : targets[1];
     }
   };
 
   // event listeners
+
+  function touchClick(eventType, el, evt) {
+    log('touchClick');
+    emitEvent(eventType, el, evt);
+    evt.preventDefault();
+  }
+
   function touchstart(evt) {
+    log('Starting touchstart');
     var el = evt.target;
     do {
-      if (el.draggable === true) {
+      var eventType = null;
+      if (el.draggable === true && el.hasAttribute('draggable')) {
         // If draggable isn't explicitly set for anchors, then simulate a click event.
         // Otherwise plain old vanilla links will stop working.
-        // https://developer.mozilla.org/en-US/docs/Web/Guide/Events/Touch_events#Handling_clicks
-        if (!el.hasAttribute("draggable") && el.tagName.toLowerCase() == "a") {
-          var clickEvt = document.createEvent("MouseEvents");
-          clickEvt.initMouseEvent("click", true, true, el.ownerDocument.defaultView, 1,
-            evt.screenX, evt.screenY, evt.clientX, evt.clientY,
-            evt.ctrlKey, evt.altKey, evt.shiftKey, evt.metaKey, 0, null);
-          el.dispatchEvent(clickEvt);
-          log("Simulating click to anchor");
-        }
+        // https://develTrueoper.mozilla.org/en-US/docs/Web/Guide/Events/Touch_events#Handling_clicks
         evt.preventDefault();
-        new DragDrop(evt,el);
+        new DragDrop(evt, el);
+      } else if (eventType = getAnchorEventType(el) || getMouseDownElementEventType(el)) {
+//        new DragDrop(evt, el);
+        throttledClickStart(eventType, el, evt);
+
+        //    evt.preventDefault();
+        log('Simulating ' + eventType);
+        return;
       }
-    } while((el = el.parentNode) && el !== doc.body);
+    } while ((el = el.parentNode) && el !== doc.body);
+
+    function getAnchorEventType(el) {
+      return null;
+      if ((el.tagName.toLowerCase() == 'a')) {
+        return 'click';
+      }
+      return null;
+    }
+
+    function getMouseDownElementEventType(el) {
+      if (el.hasAttribute('ng-mousedown')) {
+        return 'mousedown';
+      }
+      return null;
+    }
+  }
+
+  function onClickDoc(evt) {
+    throttledTouchStart.cancel();
+  }
+
+  function onMousedownDoc(evt) {
+    throttledTouchStart.cancel();
+  }
+
+  function getTimeStamp() {
+    return new Date().getTime();
   }
 
   // DOM helpers
-  function elementFromTouchEvent(el,event) {
-    var touch = event.changedTouches[0];
-    var target = doc.elementFromPoint(
-      touch[coordinateSystemForElementFromPoint + "X"],
-      touch[coordinateSystemForElementFromPoint + "Y"]
-    );
-    return target;
+
+  function deepElementsFromPoint(x, y, limit) {
+    var res = [];
+    limit = limit || Number.MAX_VALUE;
+    var ele = document.elementFromPoint(x, y);
+    while (ele && ele.tagName !== 'BODY' && ele.tagName !== 'HTML' && res.length < limit) {
+      res.push(ele);
+      ele.style.display = 'none';
+      ele = document.elementFromPoint(x, y);
+    }
+
+    for (var i = 0; i < res.length; i++) {
+      res[i].style.display = '';
+    }
+    return res;
+  }
+
+  function emitEvent(type, el, originalEvent) {
+    var event = document.createEvent('MouseEvents');
+    event.initMouseEvent(type, true, true, el.ownerDocument.defaultView, 1,
+        originalEvent.screenX, originalEvent.screenY, originalEvent.clientX, originalEvent.clientY,
+        originalEvent.ctrlKey, originalEvent.altKey, originalEvent.shiftKey, originalEvent.metaKey, 0, null);
+    el.dispatchEvent(event);
   }
 
   function onEvt(el, event, handler, context) {
-    if(context) {
+    if (context) {
       handler = handler.bind(context);
     }
     el.addEventListener(event, handler);
     return {
-      off: function() {
+      off: function () {
         return el.removeEventListener(event, handler);
       }
     };
   }
 
   function once(el, event, handler, context) {
-    if(context) {
+    if (context) {
       handler = handler.bind(context);
     }
     function listener(evt) {
       handler(evt);
-      return el.removeEventListener(event,listener);
+      return el.removeEventListener(event, listener);
     }
-    return el.addEventListener(event,listener);
+
+    return el.addEventListener(event, listener);
   }
 
   // duplicateStyle expects dstNode to be a clone of srcNode
   function duplicateStyle(srcNode, dstNode) {
     // Is this node an element?
-    if (srcNode.nodeType == 1) {
+    if (srcNode.nodeType == 1 && dstNode && dstNode.removeAttribute) {
       // Remove any potential conflict attributes
-      dstNode.removeAttribute("id");
-      dstNode.removeAttribute("class");
-      dstNode.removeAttribute("style");
-      dstNode.removeAttribute("draggable");
+      dstNode.removeAttribute('id');
+      dstNode.removeAttribute('class');
+      dstNode.removeAttribute('style');
+      dstNode.removeAttribute('draggable');
 
       // Clone the style
       var cs = window.getComputedStyle(srcNode);
@@ -332,7 +443,7 @@
       }
 
       // Pointer events as none makes the drag image transparent to document.elementFromPoint()
-      dstNode.style.pointerEvents = "none";
+      dstNode.style.pointerEvents = 'none';
     }
 
     // Do the same for the children
@@ -349,15 +460,17 @@
   }
 
   function average(arr) {
-    if (arr.length === 0) return 0;
-    return arr.reduce((function(s, v) {
-      return v + s;
-    }), 0) / arr.length;
+    if (arr.length === 0) {
+      return 0;
+    }
+    return arr.reduce((function (s, v) {
+          return v + s;
+        }), 0) / arr.length;
   }
 
-  function noop() {}
+  function noop() {
+  }
 
   main(window.iosDragDropShim);
-
 
 })(document);
