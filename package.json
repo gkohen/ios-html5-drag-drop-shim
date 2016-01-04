@@ -9,7 +9,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git://github.com/timruffles/ios-html5-drag-drop-shim.git"
+    "url": "git://github.com/gkohen/ios-html5-drag-drop-shim.git"
   },
   "keywords": [
     "dragdrop",
